@@ -102,6 +102,9 @@ O comportamento do aplicativo é o seguinte:
 - Os arquivos são criados com encoding ISO-8859-1
 - Os arquivos criados contêm o seguinte comentário no início:
   - `-- Não esqueça de excluir este comentário, e verifique se o seu editor está definido para utilizar o encoding ISO-8859-1`
+- A quebra de linha é definida automaticamente baseada no sistema operacional:
+  - **Windows:** CRLF (`\r\n`)
+  - **Unix/Linux/macOS:** LF (`\n`)
 - Ao final, será exibida a lista dos arquivos criados
 
 ### Exemplos de uso

@@ -5,12 +5,36 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/text/encoding/charmap"
 )
+
+// MigrationType representa o tipo de migration
+type MigrationType string
+
+const (
+	MigrationTypeDDL     MigrationType = "DDL"
+	MigrationTypeDML     MigrationType = "DML"
+	MigrationTypeCURRENT MigrationType = "CURRENT"
+)
+
+// MigrationConfig contém a configuração para criar uma migration
+type MigrationConfig struct {
+	Type      MigrationType
+	Timestamp string
+	Name      string
+	BasePath  string
+}
+
+// MigrationResult contém o resultado da criação de uma migration
+type MigrationResult struct {
+	UpPath   string
+	DownPath string
+}
 
 var (
 	dmlFlag bool
@@ -25,31 +49,15 @@ var rootCmd = &cobra.Command{
 	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		nome := obterNomeMigration(args)
+		configs := determinarConfiguracoes(allFlag, dmlFlag, ddlFlag, nome)
 
-		// Determina quais roots devem ser processadas e se deve criar pastas
-		roots, criarPastas := determinarRoots(allFlag, dmlFlag, ddlFlag)
-
-		if len(roots) == 0 {
+		if len(configs) == 0 {
 			fmt.Println("Nenhum tipo de migration selecionado.")
 			os.Exit(1)
 		}
 
-		arquivos := []string{}
-		timestamps := make(map[string]string)
-		now := time.Now()
-		for _, root := range roots {
-			ts := now.Format("20060102150405") + fmt.Sprintf("%03d", now.Nanosecond()/1e6)
-			timestamps[root] = ts
-			now = now.Add(time.Millisecond)
-		}
-		for _, root := range roots {
-			criarArquivosNaRaiz(root, timestamps[root], nome, &arquivos, criarPastas)
-		}
-
-		fmt.Println("Arquivos criados:")
-		for _, arq := range arquivos {
-			fmt.Println("  -", arq)
-		}
+		results := criarMigrations(configs)
+		exibirResultados(results)
 	},
 }
 
@@ -65,7 +73,7 @@ func Execute() {
 	}
 }
 
-// Função para criar diretório se não existir
+// criarDiretorio cria um diretório se não existir
 func criarDiretorio(path string) {
 	err := os.MkdirAll(path, 0755)
 	if err != nil {
@@ -74,105 +82,130 @@ func criarDiretorio(path string) {
 	}
 }
 
-// Função para criar arquivo com o comentário padrão
+// obterLineEnding retorna a quebra de linha apropriada para o sistema operacional
+func obterLineEnding() string {
+	if runtime.GOOS == "windows" {
+		return "\r\n" // CRLF para Windows
+	}
+	return "\n" // LF para Unix/Linux/macOS
+}
+
+// criarArquivo cria um arquivo com o comentário padrão
 func criarArquivo(path string) {
 	f, err := os.Create(path)
 	if err != nil {
 		fmt.Printf("Erro ao criar arquivo %s: %v\n", path, err)
 		os.Exit(1)
 	}
+	defer f.Close()
+
 	writer := charmap.ISO8859_1.NewEncoder().Writer(f)
-	writer.Write([]byte("-- Não esqueça de excluir este comentário, e verifique se o seu editor está definido para utilizar o encoding ISO-8859-1\n"))
-	f.Close()
+	comment := "-- Não esqueça de excluir este comentário, e verifique se o seu editor está definido para utilizar o encoding ISO-8859-1" + obterLineEnding()
+	writer.Write([]byte(comment))
 }
 
-// Função para criar os arquivos up.sql e down.sql em uma raiz (DML/DDL/CURRENT)
-func criarArquivosNaRaiz(root, timestamp, nome string, arquivos *[]string, criarPastas bool) {
-	switch root {
-	case "DML":
-		// Cria dentro da pasta DML/
-		dirName := fmt.Sprintf("%s_%s", timestamp, nome)
-		criarDiretorio("DML")
-		dir := filepath.Join("DML", dirName)
-		criarDiretorio(dir)
-		upPath := filepath.Join(dir, "up.sql")
-		downPath := filepath.Join(dir, "down.sql")
-		criarArquivo(upPath)
-		criarArquivo(downPath)
-		*arquivos = append(*arquivos, upPath, downPath)
-	case "DDL":
-		// Cria dentro da pasta DDL/
-		dirName := fmt.Sprintf("%s_%s", timestamp, nome)
+// criarMigration cria uma migration baseada na configuração
+func criarMigration(config MigrationConfig) MigrationResult {
+	dirName := fmt.Sprintf("%s_%s", config.Timestamp, config.Name)
+
+	var dir string
+	switch config.Type {
+	case MigrationTypeDDL:
 		criarDiretorio("DDL")
-		dir := filepath.Join("DDL", dirName)
-		criarDiretorio(dir)
-		upPath := filepath.Join(dir, "up.sql")
-		downPath := filepath.Join(dir, "down.sql")
-		criarArquivo(upPath)
-		criarArquivo(downPath)
-		*arquivos = append(*arquivos, upPath, downPath)
-	case "CURRENT":
-		// Cria na pasta atual
-		dirName := fmt.Sprintf("%s_%s", timestamp, nome)
-		dir := dirName
-		criarDiretorio(dir)
-		upPath := filepath.Join(dir, "up.sql")
-		downPath := filepath.Join(dir, "down.sql")
-		criarArquivo(upPath)
-		criarArquivo(downPath)
-		*arquivos = append(*arquivos, upPath, downPath)
+		dir = filepath.Join("DDL", dirName)
+	case MigrationTypeDML:
+		criarDiretorio("DML")
+		dir = filepath.Join("DML", dirName)
+	case MigrationTypeCURRENT:
+		dir = dirName
 	default:
-		fmt.Printf("Erro: root inválido '%s'. Deve ser 'DML', 'DDL' ou 'CURRENT'.\n", root)
+		fmt.Printf("Erro: tipo de migration inválido '%s'\n", config.Type)
 		os.Exit(1)
+	}
+
+	criarDiretorio(dir)
+	upPath := filepath.Join(dir, "up.sql")
+	downPath := filepath.Join(dir, "down.sql")
+
+	criarArquivo(upPath)
+	criarArquivo(downPath)
+
+	return MigrationResult{
+		UpPath:   upPath,
+		DownPath: downPath,
 	}
 }
 
-// Função para perguntar interativamente sobre DDL, DML e criação de pastas
+// criarMigrations cria múltiplas migrations baseadas nas configurações
+func criarMigrations(configs []MigrationConfig) []MigrationResult {
+	results := make([]MigrationResult, 0, len(configs))
+
+	now := time.Now()
+	for _, config := range configs {
+		// Gera timestamp único para cada migration
+		timestamp := now.Format("20060102150405") + fmt.Sprintf("%03d", now.Nanosecond()/1e6)
+		config.Timestamp = timestamp
+
+		result := criarMigration(config)
+		results = append(results, result)
+
+		// Incrementa o tempo para garantir timestamps únicos
+		now = now.Add(time.Millisecond)
+	}
+
+	return results
+}
+
+// exibirResultados exibe a lista de arquivos criados
+func exibirResultados(results []MigrationResult) {
+	fmt.Println("Arquivos criados:")
+	for _, result := range results {
+		fmt.Println("  -", result.UpPath)
+		fmt.Println("  -", result.DownPath)
+	}
+}
+
+// perguntarTiposMigration pergunta interativamente sobre DDL e DML
 func perguntarTiposMigration() (bool, bool) {
-	var ddl, dml bool
 	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Print("Deseja gerar DDL? (s/n): ")
 	resposta, _ := reader.ReadString('\n')
 	resposta = strings.ToLower(strings.TrimSpace(resposta))
-	ddl = (resposta == "s" || resposta == "sim")
+	ddl := (resposta == "s" || resposta == "sim")
 
 	fmt.Print("Deseja gerar DML? (s/n): ")
 	resposta, _ = reader.ReadString('\n')
 	resposta = strings.ToLower(strings.TrimSpace(resposta))
-	dml = (resposta == "s" || resposta == "sim")
+	dml := (resposta == "s" || resposta == "sim")
 
 	return ddl, dml
 }
 
-// Função para determinar quais roots devem ser processadas
-func determinarRoots(allFlag, dmlFlag, ddlFlag bool) ([]string, bool) {
-	var roots []string
-	var criarPastas bool
+// determinarConfiguracoes determina as configurações de migration baseadas nas flags
+func determinarConfiguracoes(allFlag, dmlFlag, ddlFlag bool, nome string) []MigrationConfig {
+	var configs []MigrationConfig
 
 	if allFlag {
-		roots = []string{"DDL", "DML"}
-		criarPastas = true // DDL e DML sempre vão para suas respectivas pastas
+		configs = append(configs,
+			MigrationConfig{Type: MigrationTypeDDL, Name: nome},
+			MigrationConfig{Type: MigrationTypeDML, Name: nome},
+		)
 	} else if dmlFlag || ddlFlag {
-		// Flags específicas informadas (incluindo modo interativo)
 		if ddlFlag {
-			roots = append(roots, "DDL")
+			configs = append(configs, MigrationConfig{Type: MigrationTypeDDL, Name: nome})
 		}
 		if dmlFlag {
-			roots = append(roots, "DML")
+			configs = append(configs, MigrationConfig{Type: MigrationTypeDML, Name: nome})
 		}
-		// Se flags específicas foram informadas, sempre criar nas pastas DDL/DML
-		criarPastas = true
 	} else {
-		// Nenhuma flag informada - criar na pasta corrente
-		roots = []string{"CURRENT"}
-		criarPastas = false
+		configs = append(configs, MigrationConfig{Type: MigrationTypeCURRENT, Name: nome})
 	}
 
-	return roots, criarPastas
+	return configs
 }
 
-// Função para obter o nome da migration (interativo ou via argumento)
+// obterNomeMigration obtém o nome da migration (interativo ou via argumento)
 func obterNomeMigration(args []string) string {
 	var nome string
 	if len(args) == 0 {
