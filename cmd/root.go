@@ -26,8 +26,8 @@ var rootCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		nome := obterNomeMigration(args)
 
-		// Determina quais roots devem ser processadas
-		roots := determinarRoots(allFlag, dmlFlag, ddlFlag)
+		// Determina quais roots devem ser processadas e se deve criar pastas
+		roots, criarPastas := determinarRoots(allFlag, dmlFlag, ddlFlag)
 
 		if len(roots) == 0 {
 			fmt.Println("Nenhum tipo de migration selecionado.")
@@ -43,7 +43,7 @@ var rootCmd = &cobra.Command{
 			now = now.Add(time.Millisecond)
 		}
 		for _, root := range roots {
-			criarArquivosNaRaiz(root, timestamps[root], nome, &arquivos)
+			criarArquivosNaRaiz(root, timestamps[root], nome, &arquivos, criarPastas)
 		}
 
 		fmt.Println("Arquivos criados:")
@@ -54,9 +54,9 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
-	rootCmd.Flags().BoolVar(&dmlFlag, "dml", false, "Criar arquivo dml.sql")
-	rootCmd.Flags().BoolVar(&ddlFlag, "ddl", false, "Criar arquivo ddl.sql")
-	rootCmd.Flags().BoolVar(&allFlag, "all", false, "Criar arquivos up.sql e down.sql (padrão)")
+	rootCmd.Flags().BoolVar(&dmlFlag, "dml", false, "Criar scripts DML na pasta DML/")
+	rootCmd.Flags().BoolVar(&ddlFlag, "ddl", false, "Criar scripts DDL na pasta DDL/")
+	rootCmd.Flags().BoolVar(&allFlag, "all", false, "Criar scripts DDL e DML nas pastas DDL/ e DML/")
 }
 
 func Execute() {
@@ -86,80 +86,97 @@ func criarArquivo(path string) {
 	f.Close()
 }
 
-// Função para criar os arquivos up.sql e down.sql em uma raiz (DML/DDL)
-func criarArquivosNaRaiz(root, timestamp, nome string, arquivos *[]string) {
-	var sufixo string
+// Função para criar os arquivos up.sql e down.sql em uma raiz (DML/DDL/CURRENT)
+func criarArquivosNaRaiz(root, timestamp, nome string, arquivos *[]string, criarPastas bool) {
 	switch root {
 	case "DML":
-		sufixo = "dml"
+		// Cria dentro da pasta DML/
+		dirName := fmt.Sprintf("%s_%s", timestamp, nome)
+		criarDiretorio("DML")
+		dir := filepath.Join("DML", dirName)
+		criarDiretorio(dir)
+		upPath := filepath.Join(dir, "up.sql")
+		downPath := filepath.Join(dir, "down.sql")
+		criarArquivo(upPath)
+		criarArquivo(downPath)
+		*arquivos = append(*arquivos, upPath, downPath)
 	case "DDL":
-		sufixo = "ddl"
+		// Cria dentro da pasta DDL/
+		dirName := fmt.Sprintf("%s_%s", timestamp, nome)
+		criarDiretorio("DDL")
+		dir := filepath.Join("DDL", dirName)
+		criarDiretorio(dir)
+		upPath := filepath.Join(dir, "up.sql")
+		downPath := filepath.Join(dir, "down.sql")
+		criarArquivo(upPath)
+		criarArquivo(downPath)
+		*arquivos = append(*arquivos, upPath, downPath)
+	case "CURRENT":
+		// Cria na pasta atual
+		dirName := fmt.Sprintf("%s_%s", timestamp, nome)
+		dir := dirName
+		criarDiretorio(dir)
+		upPath := filepath.Join(dir, "up.sql")
+		downPath := filepath.Join(dir, "down.sql")
+		criarArquivo(upPath)
+		criarArquivo(downPath)
+		*arquivos = append(*arquivos, upPath, downPath)
 	default:
-		fmt.Printf("Erro: root inválido '%s'. Deve ser 'DML' ou 'DDL'.\n", root)
+		fmt.Printf("Erro: root inválido '%s'. Deve ser 'DML', 'DDL' ou 'CURRENT'.\n", root)
 		os.Exit(1)
 	}
-
-	dirName := fmt.Sprintf("%s_%s_%s", timestamp, sufixo, nome)
-	dir := filepath.Join(root, dirName)
-	criarDiretorio(root)
-	criarDiretorio(dir)
-	upPath := filepath.Join(dir, "up.sql")
-	downPath := filepath.Join(dir, "down.sql")
-	criarArquivo(upPath)
-	criarArquivo(downPath)
-	*arquivos = append(*arquivos, upPath, downPath)
 }
 
-// Função para perguntar interativamente sobre DDL e DML
+// Função para perguntar interativamente sobre DDL, DML e criação de pastas
 func perguntarTiposMigration() (bool, bool) {
 	var ddl, dml bool
+	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Print("Deseja gerar DDL? (s/n): ")
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Scan()
-	resposta := strings.ToLower(strings.TrimSpace(scanner.Text()))
+	resposta, _ := reader.ReadString('\n')
+	resposta = strings.ToLower(strings.TrimSpace(resposta))
 	ddl = (resposta == "s" || resposta == "sim")
 
 	fmt.Print("Deseja gerar DML? (s/n): ")
-	scanner.Scan()
-	resposta = strings.ToLower(strings.TrimSpace(scanner.Text()))
+	resposta, _ = reader.ReadString('\n')
+	resposta = strings.ToLower(strings.TrimSpace(resposta))
 	dml = (resposta == "s" || resposta == "sim")
 
 	return ddl, dml
 }
 
 // Função para determinar quais roots devem ser processadas
-func determinarRoots(allFlag, dmlFlag, ddlFlag bool) []string {
+func determinarRoots(allFlag, dmlFlag, ddlFlag bool) ([]string, bool) {
 	var roots []string
+	var criarPastas bool
 
 	if allFlag {
 		roots = []string{"DDL", "DML"}
-	} else if !dmlFlag && !ddlFlag {
-		// Modo interativo
-		ddl, dml := perguntarTiposMigration()
-		if ddl {
-			roots = append(roots, "DDL")
-		}
-		if dml {
-			roots = append(roots, "DML")
-		}
-	} else {
-		// Flags específicas informadas
+		criarPastas = true // DDL e DML sempre vão para suas respectivas pastas
+	} else if dmlFlag || ddlFlag {
+		// Flags específicas informadas (incluindo modo interativo)
 		if ddlFlag {
 			roots = append(roots, "DDL")
 		}
 		if dmlFlag {
 			roots = append(roots, "DML")
 		}
+		// Se flags específicas foram informadas, sempre criar nas pastas DDL/DML
+		criarPastas = true
+	} else {
+		// Nenhuma flag informada - criar na pasta corrente
+		roots = []string{"CURRENT"}
+		criarPastas = false
 	}
 
-	return roots
+	return roots, criarPastas
 }
 
 // Função para obter o nome da migration (interativo ou via argumento)
 func obterNomeMigration(args []string) string {
 	var nome string
 	if len(args) == 0 {
+		// Modo interativo - pergunta o nome e os tipos
 		fmt.Print("Informe o nome para a migration: ")
 		scanner := bufio.NewScanner(os.Stdin)
 		scanner.Scan()
@@ -167,6 +184,17 @@ func obterNomeMigration(args []string) string {
 		if nome == "" {
 			fmt.Println("Nome não pode ser vazio.")
 			os.Exit(1)
+		}
+
+		// Pergunta sobre DDL e DML
+		ddl, dml := perguntarTiposMigration()
+
+		// Atualiza as flags globais baseado nas respostas
+		if ddl {
+			ddlFlag = true
+		}
+		if dml {
+			dmlFlag = true
 		}
 	} else {
 		nome = args[0]
