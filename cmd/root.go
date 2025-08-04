@@ -40,6 +40,7 @@ var (
 	dmlFlag bool
 	ddlFlag bool
 	allFlag bool
+	subDir  string
 )
 
 var rootCmd = &cobra.Command{
@@ -48,8 +49,8 @@ var rootCmd = &cobra.Command{
 	Long:  `CLI para facilitar a criação de migrations com timestamp e arquivos SQL.`,
 	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		nome := obterNomeMigration(args)
-		configs := determinarConfiguracoes(allFlag, dmlFlag, ddlFlag, nome)
+		nome, isInteractive := obterNomeMigration(args)
+		configs := determinarConfiguracoes(allFlag, dmlFlag, ddlFlag, nome, isInteractive)
 
 		if len(configs) == 0 {
 			fmt.Println("Nenhum tipo de migration selecionado.")
@@ -65,6 +66,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&dmlFlag, "dml", false, "Criar scripts DML na pasta DML/")
 	rootCmd.Flags().BoolVar(&ddlFlag, "ddl", false, "Criar scripts DDL na pasta DDL/")
 	rootCmd.Flags().BoolVar(&allFlag, "all", false, "Criar scripts DDL e DML nas pastas DDL/ e DML/")
+	rootCmd.Flags().StringVar(&subDir, "sub", "", "Especifica um subdiretório para a migration")
 }
 
 func Execute() {
@@ -108,14 +110,16 @@ func criarArquivo(path string) {
 func criarMigration(config MigrationConfig) MigrationResult {
 	dirName := fmt.Sprintf("%s_%s", config.Timestamp, config.Name)
 
+	basePath := string(config.Type)
+	if subDir != "" {
+		basePath = filepath.Join(basePath, subDir)
+	}
+
 	var dir string
 	switch config.Type {
-	case MigrationTypeDDL:
-		criarDiretorio("DDL")
-		dir = filepath.Join("DDL", dirName)
-	case MigrationTypeDML:
-		criarDiretorio("DML")
-		dir = filepath.Join("DML", dirName)
+	case MigrationTypeDDL, MigrationTypeDML:
+		criarDiretorio(basePath)
+		dir = filepath.Join(basePath, dirName)
 	case MigrationTypeCURRENT:
 		dir = dirName
 	default:
@@ -183,8 +187,19 @@ func perguntarTiposMigration() (bool, bool) {
 }
 
 // determinarConfiguracoes determina as configurações de migration baseadas nas flags
-func determinarConfiguracoes(allFlag, dmlFlag, ddlFlag bool, nome string) []MigrationConfig {
+func determinarConfiguracoes(allFlag, dmlFlag, ddlFlag bool, nome string, isInteractive bool) []MigrationConfig {
 	var configs []MigrationConfig
+
+	// Se estiver no modo interativo e nenhuma flag for definida, pergunte ao usuário
+	if isInteractive && !allFlag && !dmlFlag && !ddlFlag {
+		ddl, dml := perguntarTiposMigration()
+		if ddl {
+			ddlFlag = true
+		}
+		if dml {
+			dmlFlag = true
+		}
+	}
 
 	if allFlag {
 		configs = append(configs,
@@ -198,7 +213,7 @@ func determinarConfiguracoes(allFlag, dmlFlag, ddlFlag bool, nome string) []Migr
 		if dmlFlag {
 			configs = append(configs, MigrationConfig{Type: MigrationTypeDML, Name: nome})
 		}
-	} else {
+	} else if !isInteractive { // Apenas se não for interativo e nenhuma flag for passada
 		configs = append(configs, MigrationConfig{Type: MigrationTypeCURRENT, Name: nome})
 	}
 
@@ -206,31 +221,27 @@ func determinarConfiguracoes(allFlag, dmlFlag, ddlFlag bool, nome string) []Migr
 }
 
 // obterNomeMigration obtém o nome da migration (interativo ou via argumento)
-func obterNomeMigration(args []string) string {
-	var nome string
+func obterNomeMigration(args []string) (string, bool) {
 	if len(args) == 0 {
-		// Modo interativo - pergunta o nome e os tipos
-		fmt.Print("Informe o nome para a migration: ")
+		// Modo interativo
 		scanner := bufio.NewScanner(os.Stdin)
+
+		fmt.Print("Informe o nome para a migration: ")
 		scanner.Scan()
-		nome = strings.TrimSpace(scanner.Text())
+		nome := strings.TrimSpace(scanner.Text())
 		if nome == "" {
 			fmt.Println("Nome não pode ser vazio.")
 			os.Exit(1)
 		}
 
-		// Pergunta sobre DDL e DML
-		ddl, dml := perguntarTiposMigration()
+		fmt.Print("Informe o subdiretório (opcional): ")
+		scanner.Scan()
+		subDir = strings.TrimSpace(scanner.Text())
 
-		// Atualiza as flags globais baseado nas respostas
-		if ddl {
-			ddlFlag = true
-		}
-		if dml {
-			dmlFlag = true
-		}
-	} else {
-		nome = args[0]
+		return nome, true // Retorna o nome e que está no modo interativo
 	}
-	return nome
+
+	// Modo não interativo
+	return args[0], false
 }
+
