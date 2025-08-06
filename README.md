@@ -107,8 +107,9 @@ O comportamento do aplicativo é o seguinte:
 
 **Geral:**
 - Os arquivos são criados com encoding ISO-8859-1
-- Os arquivos criados contêm o seguinte comentário no início:
-  - `-- Não esqueça de excluir este comentário, e verifique se o seu editor está definido para utilizar o encoding ISO-8859-1`
+- Os arquivos criados contêm templates específicos baseados no tipo de migration:
+  - **DDL:** Template com comentários específicos para scripts DDL
+  - **DML:** Template com estrutura PL/SQL (BEGIN/COMMIT/EXCEPTION)
 - A quebra de linha é definida automaticamente baseada no sistema operacional:
   - **Windows:** CRLF (`\r\n`)
   - **Unix/Linux/macOS:** LF (`\n`)

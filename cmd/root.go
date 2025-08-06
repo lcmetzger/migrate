@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,7 +14,7 @@ import (
 	"golang.org/x/text/encoding/charmap"
 )
 
-// MigrationType representa o tipo de migration
+// Tipos e constantes
 type MigrationType string
 
 const (
@@ -22,20 +23,40 @@ const (
 	MigrationTypeCURRENT MigrationType = "CURRENT"
 )
 
-// MigrationConfig contém a configuração para criar uma migration
+// Estruturas de dados
 type MigrationConfig struct {
 	Type      MigrationType
 	Timestamp string
 	Name      string
-	BasePath  string
+	SubDir    string
 }
 
-// MigrationResult contém o resultado da criação de uma migration
 type MigrationResult struct {
 	UpPath   string
 	DownPath string
 }
 
+// Template para arquivos DML
+const templateDML = `BEGIN
+  -- insira aqui seus scripts DML
+  -- Não esqueça de retirar todos os comentários
+  -- O arquivo está em charset ISO-8859-1, e deve seer enviado nesse charset
+
+
+
+  COMMIT;
+EXCEPTION WHEN OTHERS THEN
+  DBMS_OUTPUT.PUT_LINE(SQLERRM);
+  DBMS_OUTPUT.PUT_LINE(DQLCODE);
+  ROLLBACK;
+END`
+
+// Template para arquivos DDL
+const templateDDL = `-- Cada script DDL deve ser terminado por ";" e abaixo de cada comando inserir uma "/"
+-- Não esqueça de retirar todos os comentários
+-- O arquivo está em charset ISO-8859-1, e deve seer enviado nesse charset`
+
+// Variáveis para as flags do Cobra
 var (
 	dmlFlag bool
 	ddlFlag bool
@@ -43,22 +64,55 @@ var (
 	subDir  string
 )
 
+// rootCmd representa o comando raiz da aplicação.
 var rootCmd = &cobra.Command{
 	Use:   "migrate [nome]",
 	Short: "Helper para criação de migrations",
 	Long:  `CLI para facilitar a criação de migrations com timestamp e arquivos SQL.`,
 	Args:  cobra.MaximumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		nome, isInteractive := obterNomeMigration(args)
-		configs := determinarConfiguracoes(allFlag, dmlFlag, ddlFlag, nome, isInteractive)
+	RunE: func(cmd *cobra.Command, args []string) error {
+		var migrationName string
+		var isInteractive bool
 
-		if len(configs) == 0 {
-			fmt.Println("Nenhum tipo de migration selecionado.")
-			os.Exit(1)
+		// Modo interativo é ativado se nenhum argumento for passado.
+		if len(args) == 0 {
+			isInteractive = true
+			interactiveResults, err := runInteractiveMode(cmd.InOrStdin(), cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			migrationName = interactiveResults.Name
+			subDir = interactiveResults.SubDir // Sobrescreve a flag --sub
+			ddlFlag = interactiveResults.DDL
+			dmlFlag = interactiveResults.DML
+			allFlag = false // --all não é uma opção no modo interativo
+		} else {
+			migrationName = args[0]
 		}
 
-		results := criarMigrations(configs)
-		exibirResultados(results)
+		if migrationName == "" {
+			return fmt.Errorf("nome da migration não pode ser vazio")
+		}
+
+		// Determina as configurações com base nas flags.
+		configs := determinarConfiguracoes(allFlag, dmlFlag, ddlFlag, migrationName, subDir)
+
+		// Se nenhuma configuração foi gerada (e não estamos no modo interativo), o padrão é criar na pasta atual.
+		if len(configs) == 0 && !isInteractive {
+			configs = append(configs, MigrationConfig{Type: MigrationTypeCURRENT, Name: migrationName, SubDir: subDir})
+		}
+
+		if len(configs) == 0 {
+			return fmt.Errorf("nenhum tipo de migration foi selecionado")
+		}
+
+		results, err := criarMigrations(configs)
+		if err != nil {
+			return err
+		}
+
+		exibirResultados(cmd.OutOrStdout(), results)
+		return nil
 	},
 }
 
@@ -75,173 +129,162 @@ func Execute() {
 	}
 }
 
-// criarDiretorio cria um diretório se não existir
-func criarDiretorio(path string) {
-	err := os.MkdirAll(path, 0755)
-	if err != nil {
-		fmt.Printf("Erro ao criar diretório %s: %v\n", path, err)
-		os.Exit(1)
+func criarDiretorio(path string) error {
+	if err := os.MkdirAll(path, 0755); err != nil {
+		return fmt.Errorf("erro ao criar diretório %s: %w", path, err)
 	}
+	return nil
 }
 
-// obterLineEnding retorna a quebra de linha apropriada para o sistema operacional
-func obterLineEnding() string {
+func processarTemplate(template string) string {
+	lineEnding := "\n"
 	if runtime.GOOS == "windows" {
-		return "\r\n" // CRLF para Windows
+		lineEnding = "\r\n"
 	}
-	return "\n" // LF para Unix/Linux/macOS
+
+	// Substitui todas as quebras de linha \n por lineEnding apropriado para o sistema
+	return strings.ReplaceAll(template, "\n", lineEnding)
 }
 
-// criarArquivo cria um arquivo com o comentário padrão
-func criarArquivo(path string) {
+func criarArquivo(path string, migrationType MigrationType) error {
 	f, err := os.Create(path)
 	if err != nil {
-		fmt.Printf("Erro ao criar arquivo %s: %v\n", path, err)
-		os.Exit(1)
+		return fmt.Errorf("erro ao criar arquivo %s: %w", path, err)
 	}
 	defer f.Close()
 
 	writer := charmap.ISO8859_1.NewEncoder().Writer(f)
-	comment := "-- Não esqueça de excluir este comentário, e verifique se o seu editor está definido para utilizar o encoding ISO-8859-1" + obterLineEnding()
-	writer.Write([]byte(comment))
+	var content string
+	switch migrationType {
+	case MigrationTypeDML:
+		content = processarTemplate(templateDML)
+	case MigrationTypeDDL, MigrationTypeCURRENT:
+		content = processarTemplate(templateDDL)
+	default:
+	}
+
+	_, err = writer.Write([]byte(content))
+	if err != nil {
+		return fmt.Errorf("erro ao escrever no arquivo %s: %w", path, err)
+	}
+	return nil
 }
 
-// criarMigration cria uma migration baseada na configuração
-func criarMigration(config MigrationConfig) MigrationResult {
+func criarMigration(config MigrationConfig) (*MigrationResult, error) {
 	dirName := fmt.Sprintf("%s_%s", config.Timestamp, config.Name)
-
 	basePath := string(config.Type)
-	if subDir != "" {
-		basePath = filepath.Join(basePath, subDir)
+
+	if config.SubDir != "" && config.Type != MigrationTypeCURRENT {
+		basePath = filepath.Join(basePath, config.SubDir)
 	}
 
 	var dir string
 	switch config.Type {
 	case MigrationTypeDDL, MigrationTypeDML:
-		criarDiretorio(basePath)
 		dir = filepath.Join(basePath, dirName)
 	case MigrationTypeCURRENT:
 		dir = dirName
 	default:
-		fmt.Printf("Erro: tipo de migration inválido '%s'\n", config.Type)
-		os.Exit(1)
+		return nil, fmt.Errorf("tipo de migration inválido: '%s'", config.Type)
 	}
 
-	criarDiretorio(dir)
+	if err := criarDiretorio(dir); err != nil {
+		return nil, err
+	}
+
 	upPath := filepath.Join(dir, "up.sql")
 	downPath := filepath.Join(dir, "down.sql")
 
-	criarArquivo(upPath)
-	criarArquivo(downPath)
-
-	return MigrationResult{
-		UpPath:   upPath,
-		DownPath: downPath,
+	if err := criarArquivo(upPath, config.Type); err != nil {
+		return nil, err
 	}
+	if err := criarArquivo(downPath, config.Type); err != nil {
+		return nil, err
+	}
+
+	return &MigrationResult{UpPath: upPath, DownPath: downPath}, nil
 }
 
-// criarMigrations cria múltiplas migrations baseadas nas configurações
-func criarMigrations(configs []MigrationConfig) []MigrationResult {
+func criarMigrations(configs []MigrationConfig) ([]MigrationResult, error) {
 	results := make([]MigrationResult, 0, len(configs))
-
 	now := time.Now()
-	for _, config := range configs {
-		// Gera timestamp único para cada migration
-		timestamp := now.Format("20060102150405") + fmt.Sprintf("%03d", now.Nanosecond()/1e6)
+
+	for i, config := range configs {
+		// Adiciona um pequeno atraso para garantir um timestamp único para cada arquivo.
+		migrationTime := now.Add(time.Duration(i) * time.Millisecond)
+		timestamp := migrationTime.Format("20060102150405") + fmt.Sprintf("%03d", migrationTime.Nanosecond()/1e6)
 		config.Timestamp = timestamp
 
-		result := criarMigration(config)
-		results = append(results, result)
-
-		// Incrementa o tempo para garantir timestamps únicos
-		now = now.Add(time.Millisecond)
+		result, err := criarMigration(config)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, *result)
 	}
 
-	return results
+	return results, nil
 }
 
-// exibirResultados exibe a lista de arquivos criados
-func exibirResultados(results []MigrationResult) {
-	fmt.Println("Arquivos criados:")
+func exibirResultados(writer io.Writer, results []MigrationResult) {
+	fmt.Fprintln(writer, "Arquivos criados:")
 	for _, result := range results {
-		fmt.Println("  -", result.UpPath)
-		fmt.Println("  -", result.DownPath)
+		fmt.Fprintln(writer, "  -", filepath.ToSlash(result.UpPath))
+		fmt.Fprintln(writer, "  -", filepath.ToSlash(result.DownPath))
 	}
 }
 
-// perguntarTiposMigration pergunta interativamente sobre DDL e DML
-func perguntarTiposMigration() (bool, bool) {
-	reader := bufio.NewReader(os.Stdin)
-
-	fmt.Print("Deseja gerar DDL? (s/n): ")
-	resposta, _ := reader.ReadString('\n')
-	resposta = strings.ToLower(strings.TrimSpace(resposta))
-	ddl := (resposta == "s" || resposta == "sim")
-
-	fmt.Print("Deseja gerar DML? (s/n): ")
-	resposta, _ = reader.ReadString('\n')
-	resposta = strings.ToLower(strings.TrimSpace(resposta))
-	dml := (resposta == "s" || resposta == "sim")
-
-	return ddl, dml
+type interactiveResult struct {
+	Name   string
+	SubDir string
+	DDL    bool
+	DML    bool
 }
 
-// determinarConfiguracoes determina as configurações de migration baseadas nas flags
-func determinarConfiguracoes(allFlag, dmlFlag, ddlFlag bool, nome string, isInteractive bool) []MigrationConfig {
+func runInteractiveMode(reader io.Reader, writer io.Writer) (*interactiveResult, error) {
+	scanner := bufio.NewScanner(reader)
+	result := &interactiveResult{}
+
+	fmt.Fprint(writer, "Informe o nome para a migration: ")
+	if !scanner.Scan() {
+		return nil, fmt.Errorf("falha ao ler entrada para o nome da migration: %w", scanner.Err())
+	}
+	result.Name = strings.TrimSpace(scanner.Text())
+
+	fmt.Fprint(writer, "Informe o subdiretório (opcional): ")
+	if !scanner.Scan() {
+		return nil, fmt.Errorf("falha ao ler entrada para o subdiretório: %w", scanner.Err())
+	}
+	result.SubDir = strings.TrimSpace(scanner.Text())
+
+	fmt.Fprint(writer, "Deseja gerar DDL? (s/n): ")
+	if !scanner.Scan() {
+		return nil, fmt.Errorf("falha ao ler entrada para DDL: %w", scanner.Err())
+	}
+	result.DDL = strings.ToLower(strings.TrimSpace(scanner.Text())) == "s"
+
+	fmt.Fprint(writer, "Deseja gerar DML? (s/n): ")
+	if !scanner.Scan() {
+		return nil, fmt.Errorf("falha ao ler entrada para DML: %w", scanner.Err())
+	}
+	result.DML = strings.ToLower(strings.TrimSpace(scanner.Text())) == "s"
+
+	return result, nil
+}
+
+func determinarConfiguracoes(useAll, useDML, useDDL bool, name, subDir string) []MigrationConfig {
 	var configs []MigrationConfig
 
-	// Se estiver no modo interativo e nenhuma flag for definida, pergunte ao usuário
-	if isInteractive && !allFlag && !dmlFlag && !ddlFlag {
-		ddl, dml := perguntarTiposMigration()
-		if ddl {
-			ddlFlag = true
+	if useAll {
+		configs = append(configs, MigrationConfig{Type: MigrationTypeDDL, Name: name, SubDir: subDir})
+		configs = append(configs, MigrationConfig{Type: MigrationTypeDML, Name: name, SubDir: subDir})
+	} else {
+		if useDDL {
+			configs = append(configs, MigrationConfig{Type: MigrationTypeDDL, Name: name, SubDir: subDir})
 		}
-		if dml {
-			dmlFlag = true
+		if useDML {
+			configs = append(configs, MigrationConfig{Type: MigrationTypeDML, Name: name, SubDir: subDir})
 		}
-	}
-
-	if allFlag {
-		configs = append(configs,
-			MigrationConfig{Type: MigrationTypeDDL, Name: nome},
-			MigrationConfig{Type: MigrationTypeDML, Name: nome},
-		)
-	} else if dmlFlag || ddlFlag {
-		if ddlFlag {
-			configs = append(configs, MigrationConfig{Type: MigrationTypeDDL, Name: nome})
-		}
-		if dmlFlag {
-			configs = append(configs, MigrationConfig{Type: MigrationTypeDML, Name: nome})
-		}
-	} else if !isInteractive { // Apenas se não for interativo e nenhuma flag for passada
-		configs = append(configs, MigrationConfig{Type: MigrationTypeCURRENT, Name: nome})
 	}
 
 	return configs
 }
-
-// obterNomeMigration obtém o nome da migration (interativo ou via argumento)
-func obterNomeMigration(args []string) (string, bool) {
-	if len(args) == 0 {
-		// Modo interativo
-		scanner := bufio.NewScanner(os.Stdin)
-
-		fmt.Print("Informe o nome para a migration: ")
-		scanner.Scan()
-		nome := strings.TrimSpace(scanner.Text())
-		if nome == "" {
-			fmt.Println("Nome não pode ser vazio.")
-			os.Exit(1)
-		}
-
-		fmt.Print("Informe o subdiretório (opcional): ")
-		scanner.Scan()
-		subDir = strings.TrimSpace(scanner.Text())
-
-		return nome, true // Retorna o nome e que está no modo interativo
-	}
-
-	// Modo não interativo
-	return args[0], false
-}
-

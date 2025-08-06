@@ -1,7 +1,7 @@
 BIN_DIR=bin
 APP_NAME=migrate
 
-all: linux macos windows
+all: clean linux macos windows
 
 linux:
 	GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o $(BIN_DIR)/$(APP_NAME)-linux main.go
