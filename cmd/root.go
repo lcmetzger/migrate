@@ -40,7 +40,7 @@ type MigrationResult struct {
 const templateDML = `BEGIN
   -- insira aqui seus scripts DML
   -- Não esqueça de retirar todos os comentários
-  -- O arquivo está em charset ISO-8859-1, e deve seer enviado nesse charset
+  -- O arquivo está em charset ISO-8859-1, e deve ser enviado nesse charset
 
 
 
