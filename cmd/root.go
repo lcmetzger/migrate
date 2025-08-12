@@ -49,12 +49,14 @@ EXCEPTION WHEN OTHERS THEN
   DBMS_OUTPUT.PUT_LINE(SQLERRM);
   DBMS_OUTPUT.PUT_LINE(SQLCODE);
   ROLLBACK;
-END;`
+END;
+`
 
 // Template para arquivos DDL
 const templateDDL = `-- Cada script DDL deve ser terminado por ";" e abaixo de cada comando inserir uma "/"
 -- Não esqueça de retirar todos os comentários
--- O arquivo está em charset ISO-8859-1, e deve seer enviado nesse charset`
+-- O arquivo está em charset ISO-8859-1, e deve seer enviado nesse charset
+`
 
 // Variáveis para as flags do Cobra
 var (
